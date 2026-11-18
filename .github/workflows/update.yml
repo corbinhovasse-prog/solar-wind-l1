@@ -1,0 +1,71 @@
+name: Update solar wind data
+
+# Every 30 minutes: restore the archives (1-minute, hourly, Kp, NASA OMNI cache), pull fresh NOAA data, rebuild the
+# dashboard JSON, deploy GitHub Pages, and save the archive back.
+# The archive lives on a separate `data` branch that is overwritten each run,
+# so the main branch's history stays clean and the repo doesn't balloon.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # GitHub may delay scheduled runs by a few minutes
+  push:
+    branches: [main]
+  workflow_dispatch:          # "Run workflow" button in the Actions tab
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # don't leave the token in .git/config; the push step passes it explicitly
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore archives from the data branch
+        run: |
+          mkdir -p data/history
+          if git fetch --depth=1 origin data 2>/dev/null; then
+            git --work-tree=data/history checkout FETCH_HEAD -- . && git reset -q
+            ls -la data/history
+          else
+            echo "no archive yet (first run)"
+          fi
+
+      - name: Run pipeline
+        run: python -m pipeline.run
+
+      - name: Save archives to the data branch
+        run: |
+          tmp=$(mktemp -d)
+          cp data/history/* "$tmp/"
+          cd "$tmp"
+          git init -q -b data
+          git add .
+          git -c user.name="l1-pipeline-bot" -c user.email="actions@users.noreply.github.com" \
+              commit -qm "archive $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deploy
+        uses: actions/deploy-pages@v4
