@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deploy.outputs.page_url || steps.deploy_first.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -79,9 +79,18 @@ jobs:
               commit -qm "archive $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
 
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: docs
+      # GitHub's artifact listing can lag a moment behind the upload, and deploy-pages checks only
+      # once. So: try, and if the site wasn't found yet, wait and try again. The run fails only if
+      # the second attempt fails too.
+      - id: deploy_first
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+      - if: steps.deploy_first.outcome == 'failure'
+        run: sleep 45
       - id: deploy
-        uses: actions/deploy-pages@v4
+        if: steps.deploy_first.outcome == 'failure'
+        uses: actions/deploy-pages@v5
