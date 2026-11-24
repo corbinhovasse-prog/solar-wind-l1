@@ -21,16 +21,16 @@ jobs:
         python: ["3.12", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - uses: actions/setup-node@v4     # runs the dashboard's 3D-model physics in one test
+      - uses: actions/setup-node@v7     # runs the dashboard's 3D-model physics in one test
         with:
-          node-version: "20"
+          node-version: "24"
       - run: pip install -r requirements-dev.txt
       # -X warn_default_encoding + error: any file opened without an explicit encoding fails the run
       - run: python -X warn_default_encoding -W error::EncodingWarning -m pytest --cov=pipeline --cov=stream --cov-report=term-missing
