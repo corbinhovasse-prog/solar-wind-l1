@@ -15,15 +15,16 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict, deque
+from datetime import datetime, timedelta
 
 from pipeline.features import lead_time_minutes, newell_coupling
 
-WINDOW = 15  # minutes kept per spacecraft
+WINDOW_MIN = 15  # minutes of history kept per spacecraft (by timestamp, not by record count)
 
 
 class Detector:
     def __init__(self):
-        self.buf = defaultdict(lambda: deque(maxlen=WINDOW))
+        self.buf = defaultdict(deque)
         self.by_minute = defaultdict(dict)  # time_tag -> {source: speed}
         self.cooldown = {}
 
@@ -42,10 +43,14 @@ class Detector:
         src, v, bz, by = rec["source"], rec.get("proton_speed"), rec.get("bz_gsm"), rec.get("by_gsm")
         buf = self.buf[src]
         buf.append(rec)
+        # drop records older than WINDOW_MIN minutes, so a data gap can't stretch the window
+        now = datetime.fromisoformat(rec["time_tag"])
+        while buf and now - datetime.fromisoformat(buf[0]["time_tag"]) > timedelta(minutes=WINDOW_MIN):
+            buf.popleft()
 
         speeds = [r["proton_speed"] for r in buf if r.get("proton_speed") is not None]
         if v is not None and len(speeds) >= 5 and v - min(speeds) > 100:
-            alerts.append(self._fire("SHOCK", rec, f"speed rose {v - min(speeds):.0f} km/s in <= {WINDOW} min to {v:.0f} km/s"))
+            alerts.append(self._fire("SHOCK", rec, f"speed rose {v - min(speeds):.0f} km/s in <= {WINDOW_MIN} min to {v:.0f} km/s"))
 
         if v is not None and bz is not None and bz < -10 and v > 450:
             c = newell_coupling(v, by or 0.0, bz)

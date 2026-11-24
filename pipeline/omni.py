@@ -57,10 +57,17 @@ def load_omni(history_dir: Path, offline_dir: str | None = None, max_age_days: i
     (OMNI revises recent data), so a normal run costs nothing."""
     if offline_dir:
         p = Path(offline_dir, "omni.csv")
-        return parse(p.read_text()) if p.exists() else pd.DataFrame(columns=COLS)
+        if p.exists():
+            return parse(p.read_text(encoding="utf-8"))
+        cache = history_dir / "omni_hourly.csv.gz"   # offline but with a saved cache: use it
+        if not cache.exists():
+            return pd.DataFrame(columns=COLS)
+        df = pd.read_csv(cache, parse_dates=["time_tag"])
+        df["time_tag"] = pd.to_datetime(df["time_tag"], utc=True)
+        return df
     cache, meta_p = history_dir / "omni_hourly.csv.gz", history_dir / "omni_meta.json"
     now = datetime.now(timezone.utc)
-    meta = json.loads(meta_p.read_text()) if meta_p.exists() else {}
+    meta = json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.exists() else {}
     fetched = datetime.fromisoformat(meta["fetched_at"]) if "fetched_at" in meta else None
     old = pd.DataFrame(columns=COLS)
     if cache.exists():
@@ -75,7 +82,7 @@ def load_omni(history_dir: Path, offline_dir: str | None = None, max_age_days: i
         df = df.drop_duplicates("time_tag", keep="last").sort_values("time_tag")
         history_dir.mkdir(parents=True, exist_ok=True)
         df.to_csv(cache, index=False, compression="gzip")
-        meta_p.write_text(json.dumps({"fetched_at": now.isoformat()}))
+        meta_p.write_text(json.dumps({"fetched_at": now.isoformat()}), encoding="utf-8")
         return df
     except Exception as e:
         print(f"OMNI unavailable this run: {e}")

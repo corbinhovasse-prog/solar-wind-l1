@@ -15,8 +15,8 @@ import pandas as pd
 
 from .ephemeris import fetch_positions
 from .features import add_features
-from .fetch import fetch_all, load_kp, merge_wind_mag
-from .insights import agreement_block, live_kp_link, longterm_block, separation_block
+from .fetch import collapse_minutes, fetch_all, load_kp, merge_wind_mag, to_minute
+from .insights import agreement_block, live_kp_link, longterm_block, separation_block, timing_block
 from .models import active_series, coverage, cross_spacecraft, detect_anomalies
 from .omni import load_omni
 
@@ -39,29 +39,48 @@ def _write(df: pd.DataFrame, path: Path):
     df.to_csv(path, index=False, compression="gzip")
 
 
-def update_archives(minute: pd.DataFrame, kp: pd.DataFrame, hist_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def update_archives(minute: pd.DataFrame, kp: pd.DataFrame, hist_dir: Path,
+                    allow_shrink: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     """The live feeds only cover about a day. Each run appends to:
       rtsw_1m.csv.gz      every spacecraft-minute, last 30 days
       rtsw_hourly.csv.gz  hourly means per spacecraft, kept forever (small)
       kp.csv.gz           Kp history, last 2 years"""
     p = hist_dir / "rtsw_1m.csv.gz"
-    m = pd.concat([_read(p), minute], ignore_index=True).drop_duplicates(["time_tag", "source"], keep="last")
+    old = _read(p)
+    old_rows = len(old)
+    if len(old):
+        # put every stored record on its whole minute and recombine (records stamped a few
+        # seconds apart for plasma and field belong to the same minute)
+        old["time_tag"] = to_minute(old["time_tag"])
+        vals = [c for c in old.columns if c not in ("time_tag", "source") and old[c].dtype.kind == "f"]
+        old = collapse_minutes(old, vals)
+    m = pd.concat([old, minute], ignore_index=True)
+    vals = [c for c in m.columns if c not in ("time_tag", "source") and m[c].dtype.kind == "f"]
+    # newest values win for a minute that's in both, but a minute's plasma from one pull and
+    # field from another are both kept (first() takes the first non-empty value per column)
+    m = (m.iloc[::-1].groupby(["time_tag", "source"], as_index=False).first()
+          .sort_values(["time_tag", "source"]))
     m = m[m["time_tag"] >= m["time_tag"].max() - pd.Timedelta(days=MINUTE_DAYS)].sort_values(["time_tag", "source"])
+    # safety: never let a run shrink an existing archive drastically (a failed restore or a
+    # broken download would otherwise overwrite weeks of history with a few hours)
+    if old_rows > 5000 and len(m) < 0.5 * old_rows and not allow_shrink:
+        raise RuntimeError(f"archive would shrink from {old_rows} to {len(m)} rows; refusing to overwrite")
     _write(m, p)
 
     hp = hist_dir / "rtsw_hourly.csv.gz"
-    cols = ["proton_speed", "proton_density", "bz_gsm", "bt"]
+    cols = [c for c in ["proton_speed", "proton_density", "bz_gsm", "by_gsm", "bt"] if c in m]   # By too, so coupling can be rebuilt
     hourly = (m.set_index("time_tag").groupby("source")[cols].resample("1h").mean()
               .dropna(how="all").reset_index())
     old_h = _read(hp)
     hh = pd.concat([old_h, hourly], ignore_index=True).drop_duplicates(["time_tag", "source"], keep="last")
-    _write(hh.sort_values(["time_tag", "source"]), hp)
+    hh = hh.sort_values(["time_tag", "source"])
+    _write(hh, hp)
 
     kpp = hist_dir / "kp.csv.gz"
     k = pd.concat([_read(kpp), kp], ignore_index=True).drop_duplicates("time_tag", keep="last")
     k = k[k["time_tag"] >= k["time_tag"].max() - pd.Timedelta(days=KP_DAYS)].sort_values("time_tag")
     _write(k, kpp)
-    return m.reset_index(drop=True), k.reset_index(drop=True)
+    return m.reset_index(drop=True), k.reset_index(drop=True), hh.reset_index(drop=True)
 
 
 # ---------------------------------------------------------------- helpers
@@ -136,11 +155,33 @@ def positions_block(tracks: pd.DataFrame, bodies: dict, v_now: float, v_typ: flo
     return out
 
 
+# ---------------------------------------------------------------- Kp response
+def kp_response(start: pd.Timestamp, lead_min: float, k: pd.Series, hours_after: int = 6) -> dict:
+    """What Earth did after an event seen at L1 at `start`.
+
+    The wind reaches Earth `lead_min` minutes later (60 if unknown). Each Kp value covers the
+    3 hours starting at its time tag. `kp_before` is the last window that ENDED by arrival (so a
+    storm already underway isn't credited to the event); `kp_after` is the highest Kp in any
+    window overlapping the `hours_after` hours after arrival; `kp_after_complete` says whether
+    those hours are fully covered yet."""
+    lead = float(lead_min) if lead_min is not None and np.isfinite(lead_min) else 60.0
+    arrival = start + pd.Timedelta(minutes=lead)
+    win = pd.Timedelta(hours=3)
+    before = k[k.index + win <= arrival]
+    after = k[(k.index + win > arrival) & (k.index <= arrival + pd.Timedelta(hours=hours_after))]
+    return {
+        "arrival": arrival.isoformat(),
+        "kp_before": float(before.iloc[-1]) if len(before) else None,
+        "kp_after": float(after.max()) if len(after) else None,
+        "kp_after_complete": bool(len(after) and after.index.max() + win >= arrival + pd.Timedelta(hours=hours_after)),
+    }
+
+
 # ---------------------------------------------------------------- run
 def run(offline: str | None, out_dir: Path, hist_dir: Path) -> dict:
     raw = fetch_all(offline)
     minute = merge_wind_mag(raw["wind"], raw["mag"])
-    m, kp = update_archives(minute, load_kp(raw["kp"]), hist_dir)
+    m, kp, hourly = update_archives(minute, load_kp(raw["kp"]), hist_dir)
 
     s = add_features(active_series(m))
     latest_t = s.index.max()
@@ -161,11 +202,14 @@ def run(offline: str | None, out_dir: Path, hist_dir: Path) -> dict:
     v_typ = float(week["proton_speed"].median()) if week["proton_speed"].notna().any() else 400.0
 
     # what happened at Earth after each flagged event (Kp in the following 6 hours)
-    k = kp.set_index("time_tag")["kp"]
+    # What Earth did next. The wind measured at L1 arrives about an hour later, so compare the
+    # Kp window that ENDED before arrival with the highest Kp in the 6 hours after arrival.
+    # (Using the window that contains the event start would credit a storm already underway.)
+    k = kp.set_index("time_tag")["kp"].sort_index()
     for e in anomalies:
         t0 = pd.Timestamp(e["start"])
-        after = k[(k.index >= t0.floor("3h")) & (k.index <= t0 + pd.Timedelta(hours=6))]
-        e["kp_after"] = float(after.max()) if len(after) else None
+        lead = s["lead_time_min"].asof(t0) if "lead_time_min" in s else np.nan
+        e.update(kp_response(t0, lead, k))
 
     tracks, bodies = fetch_positions(offline)
     cross = cross_spacecraft(m[m.time_tag >= latest_t - pd.Timedelta(days=7)])
@@ -203,15 +247,16 @@ def run(offline: str | None, out_dir: Path, hist_dir: Path) -> dict:
         "coverage_24h": coverage(m),
         "cross_spacecraft": cross,
         "agreement": agreement_block(m, tracks, v_typ),
+        "timing": timing_block(m[m.time_tag >= latest_t - pd.Timedelta(days=7)], tracks, v_typ, cross),
         "anomalies": anomalies,
         "positions": positions,
-        "separation": separation_block(m, tracks, plasma_src),
-        "kp_live": live_kp_link(s, kp),
+        "separation": separation_block(hourly, tracks, plasma_src),
+        "kp_live": live_kp_link(hourly, kp),
         "longterm": longterm_block(load_omni(hist_dir, offline)),
         "series": live_series(m, s, kp),
     }
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "latest.json").write_text(json.dumps(result, default=str))
+    (out_dir / "latest.json").write_text(json.dumps(result, default=str), encoding="utf-8")
     return result
 
 
@@ -222,7 +267,7 @@ def main():
     p.add_argument("--history", default="data/history", help="archive folder")
     a = p.parse_args()
     hist = Path(a.history)
-    if hist.suffix == ".gz":  # accept the old file-style argument
+    if hist.suffix == ".gz":  # also accept a path to a single archive file
         hist = hist.parent
     r = run(a.offline, Path(a.out), hist)
     L = r["latest"]

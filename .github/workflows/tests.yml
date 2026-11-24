@@ -1,0 +1,36 @@
+name: Tests
+
+# Runs the full test suite on every push and pull request, with a coverage report.
+# No secrets are used and the token is read-only.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Linux and Windows, current and newest Python: Windows catches file-encoding and path issues
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - uses: actions/setup-node@v4     # runs the dashboard's 3D-model physics in one test
+        with:
+          node-version: "20"
+      - run: pip install -r requirements-dev.txt
+      # -X warn_default_encoding + error: any file opened without an explicit encoding fails the run
+      - run: python -X warn_default_encoding -W error::EncodingWarning -m pytest --cov=pipeline --cov=stream --cov-report=term-missing

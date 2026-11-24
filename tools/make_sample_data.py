@@ -27,6 +27,9 @@ bz = np.convolve(rng.normal(0, 2.5, n), np.ones(15) / 15, "same") * 2
 bz[shock + 30:shock + 400] -= 12
 by = np.convolve(rng.normal(0, 2.5, n), np.ones(15) / 15, "same") * 2
 bx = rng.normal(-3, 1, n)
+# a shock compresses the field along with the plasma
+bx[shock:shock + 240] *= 2
+by[shock:shock + 240] *= 2
 bt = np.sqrt(bx**2 + by**2 + bz**2)
 
 specs = {"SOLAR1": (0, 1.00, 0.0), "IMAP": (4, 1.02, 0.2), "ACE": (-3, 0.97, -0.3)}
@@ -74,7 +77,7 @@ positions = {"tracks": pos, "bodies": bodies}
 # synthetic OMNI: hourly since 2023 with a solar-cycle-ish drift, equinox bumps and storms
 oh = pd.date_range(pd.Timestamp("2023-01-01", tz="UTC"), end.floor("h") - pd.Timedelta(days=30), freq="1h")
 m = len(oh)
-doy = oh.dayofyear.to_numpy()
+doy = oh.day_of_year.to_numpy()
 eq = np.cos(4 * np.pi * (doy - 80) / 365.25)
 ov = 420 + 60 * np.sin(np.arange(m) / (27 * 24) * 2 * np.pi) + np.convolve(rng.normal(0, 40, m), np.ones(12) / 12, "same")
 oby = np.convolve(rng.normal(0, 3, m), np.ones(4) / 4, "same")
@@ -87,8 +90,8 @@ okp = np.clip(0.6 + 0.9 * np.log1p(c3) + 0.3 * eq + rng.normal(0, 0.5, m), 0, 9)
 okp = pd.Series(okp).groupby(np.arange(m) // 3).transform("mean").round(1).to_numpy()
 lines = [f"{t:%Y-%m-%dT%H:%M:%S.000Z},{oby[i]:.1f},{obz[i]:.1f},{on[i]:.1f},{ov[i]:.0f},{80 + 40 * np.sin(i / m * np.pi):.0f},{okp[i] * 10:.0f},{-10 - 5 * okp[i]:.0f}"
          for i, t in enumerate(oh)]
-(out / "omni.csv").write_text("\n".join(lines) + "\n")
+(out / "omni.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 for name, data in {"wind": wind, "mag": mag, "kp": kp, "positions": positions}.items():
-    (out / f"{name}.json").write_text(json.dumps(data))
+    (out / f"{name}.json").write_text(json.dumps(data), encoding="utf-8")
 print(f"wrote {len(wind)} wind, {len(mag)} mag, {len(kp)} kp rows to {out}/")

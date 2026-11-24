@@ -213,3 +213,19 @@ td:not(:first-child), th:not(:first-child) { white-space: nowrap; }
 
 /* let grid columns shrink below their content width (wide tables scroll inside .table-wrap instead) */
 .grid2 > *, .magneto-grid > *, .agree-top > *, .sc-cards > * { min-width: 0; }
+
+.big-number #sync-num { display: flex; gap: 22px; font-size: 16px; }
+.big-number .hn { display: flex; flex-direction: column; align-items: flex-start; }
+.big-number .hn b { font-size: 34px; line-height: 1.05; font-variant-numeric: tabular-nums; }
+.big-number .hn small { color: var(--text-muted); font-size: 13px; }
+.sw.quiet { background: var(--grid); }
+.muted { color: var(--text-muted); }
+.sc table.vars .badge { margin-left: 0; font-size: 11.5px; }
+
+.big-number { flex-wrap: wrap; }
+.big-number .label { min-width: 0; flex: 1 1 240px; }
+
+/* spacecraft cards: let the small table wrap on narrow phones */
+.sc table.vars td, .sc table.vars th { white-space: normal; }
+.sc table.vars small { display: block; }
+@media (max-width: 400px) { .sc table.vars { font-size: 12px; } .sc table.vars td, .sc table.vars th { padding: 4px 3px; } }

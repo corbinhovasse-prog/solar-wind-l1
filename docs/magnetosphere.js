@@ -9,7 +9,7 @@ const $ = id => document.getElementById(id);
 const state = { bz: -5, v: 450, n: 6 };
 
 /* ---------- physics ---------- */
-const pdyn = (n, v) => 1.6726e-6 * n * v * v;                         // nPa
+const pdyn = (n, v) => 1.6726e-6 * n * v * v * 1.16;                  // nPa, incl. a typical 4% helium
 function shue(bz, dp) {                                                 // standoff r0 (Re) and flaring alpha
   const r0 = (10.22 + 1.29 * Math.tanh(0.184 * (bz + 8.14))) * Math.pow(dp, -1 / 6.6);
   const alpha = (0.58 - 0.007 * bz) * (1 + 0.024 * Math.log(dp));

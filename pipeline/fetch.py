@@ -19,8 +19,8 @@ URLS = {
     "kp": "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
 }
 
-WIND_COLS = ["proton_speed", "proton_density", "proton_temperature"]
-MAG_COLS = ["bt", "bx_gsm", "by_gsm", "bz_gsm"]
+WIND_COLS = ["proton_speed", "proton_density", "proton_temperature", "alpha_density"]
+MAG_COLS = ["bt", "bx_gsm", "by_gsm", "bz_gsm", "by_gse", "bz_gse"]
 HEADERS = {"User-Agent": "solar-wind-l1 student pipeline (github.com)"}
 
 
@@ -42,19 +42,44 @@ def to_frame(raw) -> pd.DataFrame:
 
 def _clean(df: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame:
     keep = ["time_tag", "source", "active", "overall_quality"] + value_cols
+    if df.empty or "time_tag" not in df.columns:
+        # an empty or broken feed (e.g. NOAA's field feed down for a pull): no rows, right columns
+        empty = pd.DataFrame({c: pd.Series(dtype="float64") for c in value_cols})
+        empty.insert(0, "active", pd.Series(dtype=bool))
+        empty.insert(0, "source", pd.Series(dtype=object))
+        empty.insert(0, "time_tag", pd.Series(dtype="datetime64[ns, UTC]"))
+        return empty
     df = df[[c for c in keep if c in df.columns]].copy()
     if "source" not in df.columns:
         df["source"] = "UNKNOWN"
     if "active" not in df.columns:
         df["active"] = True
-    df["time_tag"] = pd.to_datetime(df["time_tag"], utc=True, errors="coerce")
+    # Spacecraft stamp their records a few seconds after the minute, and not always the
+    # same second for plasma and field (IMAP: plasma at :01, field at :03). Every record
+    # is assigned to its minute BEFORE anything is merged, or those records never pair up.
+    df["time_tag"] = to_minute(df["time_tag"])
     for c in value_cols + ["overall_quality"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     df["active"] = df["active"].astype(str).str.lower().eq("true")
     present = [c for c in value_cols if c in df.columns]
     df = df.dropna(subset=["time_tag"]).dropna(subset=present, how="all")
-    return df.drop_duplicates(subset=["time_tag", "source"], keep="last")
+    return collapse_minutes(df, present)
+
+
+def to_minute(t) -> pd.Series:
+    return pd.to_datetime(t, utc=True, errors="coerce").dt.floor("min")
+
+
+def collapse_minutes(df: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame:
+    """One row per (minute, spacecraft): average any values that landed in the same minute."""
+    if not df.duplicated(["time_tag", "source"]).any():
+        return df
+    agg = {c: "mean" for c in value_cols if c in df}
+    for c in df.columns:
+        if c not in agg and c not in ("time_tag", "source"):
+            agg[c] = "max" if df[c].dtype == bool or c.startswith(("active", "q_", "overall")) else "last"
+    return df.groupby(["time_tag", "source"], as_index=False).agg(agg)
 
 
 def merge_wind_mag(wind_raw, mag_raw) -> pd.DataFrame:
@@ -81,7 +106,7 @@ def fetch_all(offline_dir: str | None = None) -> dict:
     out = {}
     for name, url in URLS.items():
         if offline_dir:
-            out[name] = json.loads(Path(offline_dir, f"{name}.json").read_text())
+            out[name] = json.loads(Path(offline_dir, f"{name}.json").read_text(encoding="utf-8"))
         else:
             out[name] = get_json(url)
     return out

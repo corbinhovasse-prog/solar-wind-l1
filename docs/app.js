@@ -218,21 +218,13 @@ function drawExplore(D) {
       ? `This pipeline's own archive starts ${when(D.history.start)}, so the window fills in as it keeps running. Pick 1 year or longer for NASA's long-term record.`
       : `${R[2] <= 72 ? "5-minute" : "Hourly"} averages from this pipeline's archive.`;
   } else {
-    const LT = D.longterm, yrs = R[3], daily = yrs <= 5, block = daily ? LT.daily : LT.monthly;
+    const LT = D.longterm, yrs = R[3], weekly = yrs >= 3 && yrs <= 5 && LT.weekly, daily = yrs <= 2;
+    const block = weekly ? LT.weekly : daily ? LT.daily : LT.monthly;
     const lo = yrs >= 99 ? 0 : Date.parse(LT.end) - yrs * 365.25 * 864e5;
     const idx = block.t.map((t, i) => [Date.parse(t), i]).filter(([t]) => t >= lo);
     const S = block[M.omni];
-    const weekly = daily && yrs >= 3;   // 3-5 years of daily points is too dense to read: average by week
-    const p = arr => {
-      const raw = idx.map(([t, i]) => ({ x: t, y: arr[i] }));
-      if (!weekly) return raw;
-      const out = [];
-      for (let j = 0; j < raw.length; j += 7) {
-        const w = raw.slice(j, j + 7).filter(q => q.y != null);
-        if (w.length) out.push({ x: w[0].x, y: w.reduce((a, q) => a + q.y, 0) / w.length });
-      }
-      return out;
-    };
+    // every band is the true 25th-75th percentile of the HOURS in each day, week or month
+    const p = arr => idx.map(([t, i]) => ({ x: t, y: arr[i] }));
     const c = css("--series-1");
     datasets = [
       { label: "25th percentile", data: p(S.p25), borderWidth: 0, pointRadius: 0, fill: false },
@@ -290,8 +282,9 @@ function renderLongview(D) {
   draw("bymonth-chart", { type: "bar", data: { labels: MON, datasets: [{ data: bm, borderRadius: 4,
     backgroundColor: MON.map((_, i) => eq.includes(i) ? css("--series-1") : css("--seq-2")) }] }, options: o });
   $("bymonth-note").textContent = `Most disturbed month: ${MON[hi]} (${fmt(bm[hi], 2)}); calmest: ${MON[lo]} (${fmt(bm[lo], 2)}). ` +
-    `Darker bars are the equinox months. Around the equinoxes Earth's magnetic axis is angled so that the solar wind's field ` +
-    `links up with it more easily (the Russell–McPherron effect), so the same solar wind stirs up more activity.`;
+    `Darker bars are the equinox months. Two geometric effects lift activity around the equinoxes: the Russell–McPherron effect ` +
+    `(how the solar wind's field projects onto Earth's) and the equinoctial effect (the angle between Earth's magnetic axis and the solar wind flow). ` +
+    `Cliver et al. (2000) attribute about 65% of this six-month rhythm to the equinoctial effect.`;
 
   const Y = LT.by_year;
   const o2 = baseOpts("3-hour windows with Kp ≥ 5");
@@ -404,24 +397,36 @@ const field = { range: "3d", zoom: null };
 function renderField(D) {
   seg($("bz-range-seg"), [["24h", "24 h"], ["3d", "3 days"], ["7d", "7 days"]], field.range, k => { field.range = k; field.zoom = null; drawField(D); });
   $("bz-reset").onclick = () => { field.zoom = null; drawField(D); };
+  const SR = D.longterm && D.longterm.storm_rule;
+  if (SR) $("storm-rule-note").textContent = `That threshold is calibrated on NASA OMNI data: after ${SR.windows.toLocaleString()} such windows, Kp reached storm level ` +
+    `${fmt(100 * SR.p_storm_after)}% of the time (the usual rate is ${fmt(100 * SR.base_rate, 1)}%), and ${fmt(100 * SR.share_of_storms_flagged)}% of storms were preceded by one. ` +
+    `It confirms sustained driving as it happens; it isn't a forecast.`;
+  // significant events are numbered 1, 2, 3 in time order; minor ones aren't numbered
+  const sigNum = {};
+  D.anomalies.forEach((e, i) => { if (e.significant !== false) sigNum[i] = Object.keys(sigNum).length + 1; });
+  field.sigNum = sigNum;
   const card = (e, i) => {
-    const n = i + 1;
-    let impact, hit = false;
-    if (e.geoeffective && e.kp_after >= 5) { impact = `Bz went south (to ${fmt(e.min_bz, 1)} nT) and a storm followed: Kp reached ${fmt(e.kp_after, 1)}.`; hit = true; }
-    else if (e.geoeffective) impact = `Bz went south (to ${fmt(e.min_bz, 1)} nT). Kp in the next 6 h: ${e.kp_after == null ? "not yet known" : fmt(e.kp_after, 1)}.`;
-    else if (e.min_bz < 0) impact = `Bz was only weakly south (lowest ${fmt(e.min_bz, 1)} nT), so little effect at Earth${e.kp_after != null ? ` (Kp max ${fmt(e.kp_after, 1)} afterwards)` : ""}.`;
-    else impact = `Bz stayed north, so little effect at Earth${e.kp_after != null ? ` (Kp max ${fmt(e.kp_after, 1)} afterwards)` : ""}.`;
+    const n = sigNum[i] ?? "·";
+    let hit = false;
+    const kpTxt = e.kp_after == null ? "Kp after arrival: not yet known."
+      : `Kp went from ${e.kp_before == null ? "?" : fmt(e.kp_before, 1)} before this wind arrived to ${fmt(e.kp_after, 1)} in the 6 hours after${e.kp_after_complete ? "" : " (so far)"}.`;
+    const already = e.kp_before != null && e.kp_before >= 4 ? " Kp was already elevated, so not all of that is this event." : "";
+    let impact;
+    if (e.geoeffective && e.kp_after >= 5 && !(e.kp_before >= 5)) { impact = `Bz went south (to ${fmt(e.min_bz, 1)} nT). ${kpTxt}${already}`; hit = true; }
+    else if (e.geoeffective) impact = `Bz went south (to ${fmt(e.min_bz, 1)} nT). ${kpTxt}${already}`;
+    else if (e.min_bz < 0) impact = `Bz was only weakly south (lowest ${fmt(e.min_bz, 1)} nT). ${kpTxt}${already}`;
+    else impact = `Bz stayed north. ${kpTxt}${already}`;
     return `<button class="event ${e.significant === false ? "minor" : ""}" data-i="${i}">
       <div><span class="num">${n}</span><span class="type">${e.significant === false ? "Minor: " + e.type.toLowerCase() : e.type}</span></div>
       <div class="when">${when(e.start)} · ${e.minutes} min</div>
       <ul>${e.why.map(w => `<li>${w}</li>`).join("")}</ul>
-      ${e.significance && e.significance.length ? `<div class="when">Significant because: ${e.significance.join(", ")}</div>` : ""}
+      ${e.significance && e.significance.length ? `<div class="when">Significant because: ${e.significance.join("; ")}${e.model_flagged ? ". Also flagged by the anomaly model." : "."}</div>` : ""}
       <div class="impact ${hit ? "hit" : ""}">${impact}</div></button>`;
   };
   const all = D.anomalies.map((e, i) => [e, i]).reverse();
   const big = all.filter(([e]) => e.significant !== false), minor = all.filter(([e]) => e.significant === false);
   $("events").innerHTML = (big.length ? big.map(([e, i]) => card(e, i)).join("")
-      : `<div class="empty" style="grid-column:1/-1">No significant events in the last 7 days: nothing crossed a physical threshold (a 50 km/s speed jump, Bz below −10 nT, or pressure or field strength 2.5× normal).</div>`) +
+      : `<div class="empty" style="grid-column:1/-1">No significant events in the last 7 days. Every minute was checked against each physical threshold listed under "How events are detected", and none was crossed.</div>`) +
     (minor.length ? `<details class="minor-list" style="grid-column:1/-1"><summary>${minor.length} minor fluctuation${minor.length > 1 ? "s" : ""}: statistically unusual for this week, but below every physical threshold</summary>
       <div class="events">${minor.map(([e, i]) => card(e, i)).join("")}</div></details>` : "");
   $("events").onclick = e => {
@@ -447,7 +452,7 @@ function drawField(D) {
   o.plugins.refs = {
     southFill: true,
     lines: [{ y: 0, label: "north above · south below" }, { y: -5, label: "moderately south" }, { y: -10, label: "strongly south" }],
-    bands: D.anomalies.map((e, i) => ({ start: e.start, end: e.end, label: e.significant === false ? "" : String(i + 1),
+    bands: D.anomalies.map((e, i) => ({ start: e.start, end: e.end, label: e.significant === false ? "" : String((field.sigNum || {})[i] ?? ""),
                                         minor: e.significant === false, on: field.zoom && field.zoom.i === i })),
   };
   o.plugins.tooltip.callbacks = { label: c => ` Bz ${fmt(c.parsed.y, 1)} nT (${c.parsed.y < 0 ? "south" : "north"})` };
@@ -462,23 +467,26 @@ function drawField(D) {
   for (const x of v) { run = x < 0 ? run + 1 : 0; best = Math.max(best, run); }
   const southPct = 100 * v.filter(x => x < 0).length / v.length, strong = v.filter(x => x <= -10).length * step;
   $("bz-insight").textContent = `In this window Bz pointed south ${fmt(southPct)}% of the time; the longest southward stretch lasted ${duration(best * step * 60)}` +
-    (strong ? `, and it spent ${duration(strong * 60)} below −10 nT, enough to drive a storm if sustained.` : `. It never reached −10 nT, the level that usually drives storms.`);
+    (strong ? `, and it spent ${duration(strong * 60)} below −10 nT, enough to drive a storm if sustained.`
+             : `. It never reached −10 nT, though hours of moderately southward field can build a storm too (see the sustained-driving rule below).`);
 }
 
 /* ---------- section: L1 -> Earth ---------- */
 function liveVerdict(K) {
   if (K.rho_shifted == null) return `Only ${K.n} three-hour windows so far; at least 8 are needed for a first estimate.`;
-  const chance = K.p_shifted == null ? null : K.p_shifted < 0.001 ? "less than 0.1%" : `about ${fmt(100 * K.p_shifted)}%`;
   const strength = Math.abs(K.rho_shifted) >= 0.7 ? "strong" : Math.abs(K.rho_shifted) >= 0.4 ? "moderate" : Math.abs(K.rho_shifted) >= 0.2 ? "weak" : "very weak";
-  let txt = `ρ = ${fmt(K.rho_shifted, 2)} (${strength}) across ${K.n} three-hour windows, after shifting each reading by its travel time (about ${fmt(K.mean_lead_min)} min). `;
-  if (chance) txt += `If coupling and Kp were unrelated, a ρ this far from zero would still turn up ${chance} of the time by chance (p = ${fmt(K.p_shifted, 3)}). `;
+  let txt = `ρ = ${fmt(K.rho_shifted, 2)} (${strength}) across ${K.n} three-hour windows (${fmt(K.archive_days, 1)} days of this pipeline's data), ` +
+    `after moving each reading to its arrival time at Earth (about ${fmt(K.mean_lead_min)} min later). `;
+  if (K.ci) txt += `95% range: ${fmt(K.ci[0], 2)} to ${fmt(K.ci[1], 2)}. `;
+  if (K.n_eff != null) txt += `Neighbouring windows aren't independent (both series change slowly), so these ${K.n} windows carry the information of about ${fmt(K.n_eff)} independent ones; `;
+  if (K.p_shifted != null) txt += `allowing for that, p = ${fmt(K.p_shifted, 3)}${K.p_naive != null ? ` (a naive test would claim ${fmt(K.p_naive, 4)})` : ""}. `;
   if (K.p_shifted != null && K.p_shifted >= 0.05) {
-    txt += `So this can't yet be told apart from random variation`;
-    txt += K.n_needed ? `: a true ρ of this size needs about ${K.n_needed} windows (${fmt(K.n_needed / 8)} days) to show up reliably.` : ".";
-    if (K.kp_range && K.kp_range[1] - K.kp_range[0] < 2) txt += ` Kp has also stayed in a narrow range (${fmt(K.kp_range[0], 1)}–${fmt(K.kp_range[1], 1)}), which hides any relationship; a storm would make it much clearer.`;
+    txt += `That can't yet be told apart from chance`;
+    txt += K.n_needed ? `; a true ρ of this size needs roughly ${K.n_needed} windows (${fmt(K.n_needed / 8)} days), which the permanent hourly archive will reach.` : ".";
   } else if (K.p_shifted != null) {
-    txt += `That's unlikely to be luck: the link is showing up in this pipeline's own data.`;
+    txt += `Unlikely to be luck: the link shows up in this pipeline's own data.`;
   }
+  if (K.kp_range && K.kp_range[1] - K.kp_range[0] < 2) txt += ` Kp has stayed in a narrow range (${fmt(K.kp_range[0], 1)}–${fmt(K.kp_range[1], 1)}), which hides any relationship.`;
   return txt;
 }
 
@@ -494,8 +502,8 @@ function renderPredict(D) {
   $("kp-live-note").textContent = K.n ? liveVerdict(K) : "Collecting data: the comparison appears once a few three-hour windows have passed.";
 
   if (!LT || !LT.available) { ["lag-chart", "resid-chart"].forEach(id => $(id).closest("div").style.display = "none"); return; }
-  const KD = LT.kp_drivers;
-  $("lag-title").textContent = `How long Earth takes to respond (NASA OMNI, ${new Date(LT.start).getFullYear()}–${new Date(LT.end).getFullYear()})`;
+  const KD = LT.kp_drivers, years = `${new Date(LT.start).getFullYear()}–${new Date(LT.end).getFullYear()}`;
+  $("lag-title").textContent = `How long Earth takes to respond (NASA OMNI, ${years})`;
   const o2 = baseOpts("ρ (rank correlation)");
   o2.scales.x = { type: "category", title: { display: true, text: "hours between the wind arriving and Kp", color: css("--text-muted") },
                   grid: { display: false }, ticks: { color: css("--text-muted") }, border: { display: false } };
@@ -503,108 +511,135 @@ function renderPredict(D) {
   o2.plugins.tooltip.callbacks = { label: c => ` ρ = ${fmt(c.parsed.y, 3)}` };
   draw("lag-chart", { type: "bar", data: { labels: KD.lag_hours.map(h => `${h}`), datasets: [{ data: KD.lag_rho, borderRadius: 3,
     backgroundColor: KD.lag_hours.map(h => h === KD.best_lag_h ? css("--series-1") : css("--seq-2")) }] }, options: o2 });
-  $("lag-note").textContent = `The match is strongest when coupling is compared with Kp about ${KD.best_lag_h} h later (ρ = ${fmt(KD.rho_best, 2)} over ` +
-    `${KD.n_windows.toLocaleString()} windows; with that many samples the chance of this being luck is effectively zero). ` +
-    `Earth's field stores energy before releasing it, so Kp trails the solar wind.`;
+  $("lag-note").textContent = `Coupling matches Kp best about ${KD.best_lag_h} h after the wind arrives (ρ = ${fmt(KD.rho_best, 2)} over ` +
+    `${KD.n_windows.toLocaleString()} windows), in line with Borovsky (2013). Earth's field takes time to load and release energy, so Kp trails the solar wind.`;
 
-  const a = KD.r2_coupling, b = Math.max(KD.r2_plus_memory - a, 0), c2 = Math.max(KD.r2_plus_season - KD.r2_plus_memory, 0), rest = Math.max(1 - KD.r2_plus_season, 0);
-  const segs = [["solar wind coupling", a, "--series-1"], ["memory (Kp 3 h earlier)", b, "--series-2"], ["time of year", c2, "--series-3"]];
+  // order-independent shares (Shapley / LMG): the same answer whichever factor is added first
+  const S = KD.shapley, rest = Math.max(1 - KD.r2_full, 0);
+  const segs = [["solar wind now", S.wind_now, "--series-1"], ["solar wind earlier", S.wind_history, "--series-3"],
+                ["Kp memory", S.memory, "--series-2"], ["season", S.season, "--seq-3"]];
   $("explain-bar").innerHTML = segs.map(([l, v, col]) => `<div style="width:${100 * v}%;background:${css(col)}" title="${l}: ${fmt(100 * v)}%">${v > .07 ? fmt(100 * v) + "%" : ""}</div>`).join("") +
     `<div class="rest" style="width:${100 * rest}%" title="not explained: ${fmt(100 * rest)}%">${rest > .07 ? fmt(100 * rest) + "%" : ""}</div>`;
   $("explain-bar").insertAdjacentHTML("afterend", `<div class="explain-key">${segs.map(([l, , col]) => `<span><i style="background:${css(col)}"></i>${l}</span>`).join("")}` +
     `<span><i style="background:${css("--surface-2")};box-shadow:inset 0 0 0 1px ${css("--border")}"></i>unexplained</span></div>`);
-  $("explain-note").textContent = `Coupling alone explains ${fmt(100 * a)}% of Kp's ups and downs. Knowing Kp three hours earlier adds ${fmt(100 * b)} points, ` +
-    `because a disturbed field takes time to settle. ` +
-    (c2 >= 0.01 ? `The time of year adds ${fmt(100 * c2)} more. ` : `The time of year adds almost nothing once those two are known: the seasonal effect is real but small next to day-to-day swings. `) +
-    `The remaining ${fmt(100 * rest)}% comes from things this model doesn't see, ` +
-    `such as energy stored and suddenly released in Earth's magnetic tail, and the gap between the wind measured near L1 and the wind that actually arrives.`;
+  const seq = KD.sequential;
+  $("explain-note").textContent = `Together these explain ${fmt(100 * KD.r2_full)}% of Kp's ups and downs. The shares are order-independent (Shapley values): ` +
+    `adding factors one after another would give coupling ${fmt(100 * seq.coupling_first[0])}% if it went first but only ${fmt(100 * (seq.memory_first[1] - seq.memory_first[0]))}% if Kp memory went first. ` +
+    `Much of what looks like "memory" is really the solar wind's recent history: once earlier wind is included, knowing the previous Kp adds just ` +
+    `${fmt(100 * KD.memory_gain_after_wind, 1)} points (versus ${fmt(100 * KD.memory_gain_coupling_only)} next to coupling alone).`;
+
+  const OOS = KD.out_of_sample || {};
+  if (OOS.coupling != null) {
+    const rows = [["Kp stays the same as 3 hours ago (persistence)", OOS.persistence], ["Coupling only", OOS.coupling],
+                  ["Solar wind now + earlier + viscous term", OOS.wind], ["…plus Kp memory and season", OOS.wind_memory_season],
+                  ["Gradient boosting on solar wind inputs (ML)", OOS.boosting_wind]].filter(r => r[1] != null);
+    $("oos-table").innerHTML = `<tr><th>Model, fitted on ${OOS.train}, scored on ${OOS.test}</th><th>R² on unseen years</th></tr>` +
+      rows.map(([l, v]) => `<tr><td>${l}</td><td>${fmt(v, 2)}</td></tr>`).join("");
+    $("oos-note").textContent = `R² measured on ${OOS.n_test.toLocaleString()} windows the models never saw. Simply assuming Kp stays where it was already scores ${fmt(OOS.persistence, 2)}, ` +
+      `so that is the bar to beat; the solar wind models beat it.`;
+  }
 
   const o3 = baseOpts("Kp above / below prediction");
   o3.scales.x = { type: "category", grid: { display: false }, ticks: { color: css("--text-muted") }, border: { display: false } };
-  o3.plugins.tooltip.callbacks = { label: c => ` ${c.parsed.y >= 0 ? "+" : ""}${fmt(c.parsed.y, 2)} Kp vs. the coupling-only prediction` };
+  o3.plugins.tooltip.callbacks = { label: c => ` ${c.parsed.y >= 0 ? "+" : ""}${fmt(c.parsed.y, 2)} Kp vs. the solar-wind-only prediction` };
   o3.plugins.refs = { lines: [{ y: 0, label: "" }] };
   draw("resid-chart", { type: "bar", data: { labels: MON, datasets: [{ data: KD.resid_by_month, borderRadius: 3,
     backgroundColor: KD.resid_by_month.map(v => v >= 0 ? css("--series-2") : css("--seq-2")) }] }, options: o3 });
   const rm = KD.resid_by_month, top2 = rm.map((v, i) => [v, i]).sort((x, y) => y[0] - x[0]).slice(0, 2).map(([, i]) => MON[i]);
-  $("resid-note").textContent = `Bars above zero: Earth was more disturbed than the solar wind alone predicts. The largest excess is in ${top2.join(" and ")}` +
-    ` (up to ${fmt(Math.max(...rm), 2)} Kp), the equinox effect from the month chart above. It's a real pattern, but a fraction of a Kp step.`;
+  $("resid-note").textContent = `Above zero: Earth was more disturbed than the solar wind model predicts. The excess peaks in ${top2.join(" and ")} (up to ${fmt(Math.max(...rm), 2)} Kp). ` +
+    `Coupling is computed in coordinates tied to Earth's magnetic axis, so it already includes the Russell–McPherron effect; what remains is mostly the equinoctial effect, ` +
+    `which Cliver et al. (2000) credit with about 65% of this six-month rhythm. Real, but a fraction of a Kp step.`;
 
-  $("predict-insight").textContent = `Over ${new Date(LT.start).getFullYear()}–${new Date(LT.end).getFullYear()}, the wind's coupling explains about ${fmt(100 * a)}% of Kp, ` +
-    `with the best match ${KD.best_lag_h} h after the wind arrives. ${K.n ? `This pipeline's own data so far: ρ = ${fmt(K.rho_shifted, 2)} after the time shift.` : ""}`;
+  $("predict-insight").textContent = `On years the model never saw (${OOS.test || "recent years"}), solar wind inputs alone explain ${fmt(100 * (OOS.wind ?? KD.r2_full))}% of Kp, ` +
+    `beating "Kp stays the same" (${fmt(100 * (OOS.persistence ?? 0))}%). ` +
+    (K.n ? `This pipeline's own data so far: ρ = ${fmt(K.rho_shifted, 2)}${K.ci ? ` (95% range ${fmt(K.ci[0], 2)}–${fmt(K.ci[1], 2)})` : ""}.` : "");
 }
 
 /* ---------- section: agreement ---------- */
 function renderAgree(D) {
-  const A = D.agreement;
-  const sync = A.three_way_sync_pct ?? A.any_pair_sync_pct;
-  $("sync-num").textContent = sync == null ? "–" : `${fmt(sync)}%`;
-  $("sync-label").textContent = A.three_way_sync_pct != null ? "of the time all three move in step (last 7 days, offsets removed)"
-    : A.any_pair_sync_pct != null ? "of the time the reporting spacecraft move in step (all three rarely report together)" : "not enough overlapping data yet";
+  const A = D.agreement, H = A.headline_r_change || {};
+  const word = r => r == null ? "—" : r >= 0.7 ? "strong" : r >= 0.4 ? "moderate" : r >= 0.2 ? "weak" : "very weak";
+  $("sync-num").innerHTML = ["speed", "bz", "density"].map(k => `<span class="hn"><b>${H[k] == null ? "—" : fmt(H[k], 2)}</b><small>${k === "bz" ? "Bz" : k}</small></span>`).join("");
+  $("sync-label").textContent = `How closely the spacecraft's hour-to-hour changes match (median correlation over all pairs, last ${A.window_days} days). ` +
+    `Speed: ${word(H.speed)}. Bz: ${word(H.bz)}. Density: ${word(H.density)}.`;
   const cls = { "in step": "instep", "partly in step": "partly", "out of step": "out", "not enough data": "none" };
-  const words = { "in step": "Rises and falls with the others: trust its changes.",
-                  "partly in step": "Follows the big moves, drifts on the small ones.",
-                  "out of step": "Often moves differently: check before trusting it.",
+  const words = { "in step": "Speed and Bz rise and fall with the others: trust its changes.",
+                  "partly in step": "Follows the others on some measurements, not all.",
+                  "out of step": "Its changes don't match the others better than chance: check before trusting it.",
                   "not enough data": "Too little overlap with the others to judge yet." };
-  const off = (v, unit) => v.bias == null ? "—" : `${v.bias > 0 ? "+" : ""}${fmt(v.bias, unit === "nT" ? 1 : 0)}${unit === "nT" ? " nT" : "%"}`;
-  const varRow = (label, v, unit) => `<tr><td>${label}</td><td>${v && v.track_pct != null ? fmt(v.track_pct) + "%" : "—"}</td><td>${v && v.track_pct != null ? off(v, unit) : (v ? v.n + " bins" : "—")}</td></tr>`;
+  const vcls = { strong: "instep", moderate: "instep", weak: "partly", "no better than chance": "out", "flat signal": "out", "not enough data": "none" };
+  const row = (label, v, unit) => {
+    if (!v || v.r_change == null) return `<tr><td>${label}</td><td colspan="3">${v && v.verdict === "flat signal" ? '<span class="badge out">flat signal</span>' : (v ? v.n + " bins" : "—")}</td></tr>`;
+    const off = v.offset == null ? "—" : `${v.offset > 0 ? "+" : ""}${fmt(v.offset, unit === "nT" ? 1 : 0)}${unit === "nT" ? " nT" : "%"}`;
+    return `<tr><td>${label}</td><td>${fmt(v.r_change, 2)} <small class="muted">(chance ${fmt(v.chance, 2)})</small></td><td><span class="badge ${vcls[v.verdict] || "none"}">${v.verdict}</span></td><td>${off}</td></tr>`;
+  };
   $("sc-cards").innerHTML = SRC.filter(([k]) => A.spacecraft[k]).map(([k, name, c]) => {
     const q = A.spacecraft[k];
+    const shift = q.time_shift_min ? `Lined up ${q.time_shift_min > 0 ? "+" : ""}${q.time_shift_min} min (it sees the wind ${Math.abs(q.time_shift_min)} min ${q.time_shift_min > 0 ? "earlier" : "later"}).` : "";
     return `<div class="sc" style="--c:${css(c)}"><div class="name">${name}<span class="badge ${cls[q.verdict]}">${q.verdict}</span></div>
-      <div class="row"><span>Moves with the others</span><b>${q.track_pct == null ? "—" : fmt(q.track_pct) + "%"}</b></div>
       <div class="row"><span>Reporting</span><b>${fmt(q.coverage_pct)}%</b></div>
-      <table class="vars"><tr><th></th><th>in step</th><th>offset</th></tr>${varRow("Speed", q.vars.speed, "%")}${varRow("Density", q.vars.density, "%")}${varRow("Bz", q.vars.bz, "nT")}</table>
-      <div class="row"><span>Bz sign vs. the other two</span><b>${q.bz_contrarian_pct == null ? "—" : fmt(q.bz_contrarian_pct, 1) + "% opposite"}</b></div>
+      <table class="vars"><tr><th></th><th>moves with others</th><th></th><th>offset</th></tr>${row("Speed", q.vars.speed, "%")}${row("Bz", q.vars.bz, "nT")}${row("Density", q.vars.density, "%")}</table>
       ${q.calibration_flags.length ? `<div class="flags">Calibration: ${q.calibration_flags.join(", ")} vs. the others</div>` : ""}
-      <div class="note">${words[q.verdict]}</div></div>`;
-  }).join("") + `<p class="note" style="grid-column:1/-1">In step: share of 5-minute steps within tolerance after removing the offset. Offset: how far it reads above or below the group on average. ` +
-    (D.calibration && D.calibration.factors && Object.keys(D.calibration.factors).length ? `The headline numbers at the top of the page combine spacecraft on ${NAME[D.calibration.reference]}'s scale: ` +
-      Object.entries(D.calibration.factors).map(([k, f]) => `${NAME[k]} ${Object.entries(f).map(([c, v]) => `${c.replace("proton_", "")} ×${fmt(v, 2)}`).join(", ")}`).join("; ") + ". " : "") +
-    (A.aligned_by_position ? `Times were lined up first: ${SRC.filter(([k]) => A.spacecraft[k]).map(([k, n]) => `${n} ${A.spacecraft[k].time_shift_min >= 0 ? "+" : ""}${fmt(A.spacecraft[k].time_shift_min, 1)} min`).join(", ")}.` : "") + `</p>`;
+      <div class="note">${words[q.verdict]} ${shift}</div></div>`;
+  }).join("") + `<p class="note" style="grid-column:1/-1">"Moves with others" is the correlation of hour-to-hour changes with the other spacecraft's median, after lining up their timing. ` +
+    `"Chance" is the same correlation with the others shifted 3+ hours out of sync, so a real match has to beat it. Offset is how far it reads above or below the others on average (a calibration difference). ` +
+    (D.calibration && D.calibration.factors && Object.keys(D.calibration.factors).length ? `The headline numbers at the top of the page put every spacecraft on ${NAME[D.calibration.reference]}'s scale: ` +
+      Object.entries(D.calibration.factors).map(([k, f]) => `${NAME[k]} ${Object.entries(f).map(([cc, v]) => `${cc.replace("proton_", "")} ×${fmt(v, 2)}`).join(", ")}`).join("; ") + "." : "") + `</p>`;
 
-  const T = A.strip.t;
+  const T = A.strip.t, lab = { nodata: "no data", solo: "reporting alone", agree: "Bz changes match", differ: "Bz changes differ", quiet: "too quiet to judge" };
   $("strip").innerHTML = SRC.filter(([k]) => A.strip.status[k]).map(([k, name]) =>
     `<div class="lane"><span>${name}</span><div class="cells" style="grid-template-columns:repeat(${T.length},1fr)">` +
-    A.strip.status[k].map((st, i) => `<i class="sw ${st}" title="${when(T[i])}: ${st === "nodata" ? "no data" : st === "solo" ? "reporting alone" : st === "agree" ? "agrees" : "differs"}"></i>`).join("") +
-    `</div></div>`).join("");
+    A.strip.status[k].map((st, i) => `<i class="sw ${st}" title="${when(T[i])}: ${lab[st]}"></i>`).join("") + `</div></div>`).join("");
 
+  // lag convention from the pipeline: minutes by which the SECOND spacecraft of "A vs B" sees the wind before A
+  const first = (r, v) => {
+    if (v == null) return "—";
+    const [a, b] = r.pair.split(" vs ").map(x => NAME[x] || x);
+    if (Math.abs(v) < 0.5) return "together";
+    return `${v > 0 ? b : a} first, ${fmt(Math.abs(v), Math.abs(v) < 10 ? 1 : 0)} min`;
+  };
   const cols = r => {
     const sp = r.proton_speed || {}, bz = r.bz_gsm || {};
-    const few = sp.r == null && bz.r == null;
-    return `<tr><td>${r.pair.replace("SOLAR1", "SOLAR-1")}</td>` +
-      (few ? `<td colspan="4" style="text-align:left">too little overlap (${Math.max(sp.n || 0, bz.n || 0)} five-minute bins)</td>`
-           : `<td>${fmt(sp.r, 3)}</td><td>${sp.median_bias == null ? "—" : (sp.median_bias > 0 ? "+" : "") + fmt(sp.median_bias, 1) + " km/s"}</td>` +
-             `<td>${fmt(bz.r, 3)}</td><td>${bz.median_bias == null ? "—" : (bz.median_bias > 0 ? "+" : "") + fmt(bz.median_bias, 2) + " nT"}</td>`) +
-      `<td>${r.bz_best_lag_min != null ? r.bz_best_lag_min + " min" : "—"}</td><td>${r.position_lag_min != null ? r.position_lag_min + " min" : "—"}</td>` +
-      `<td>${r.separation_km != null ? fmt(r.separation_km / 1000) + "k km" : "—"}</td></tr>`;
+    return `<tr><td>${r.pair.replace("SOLAR1", "SOLAR-1")}</td><td>${fmt(sp.r, 2)}</td><td>${fmt(bz.r, 2)}</td>` +
+      `<td><b>${first(r, r.bz_best_lag_min)}</b></td><td>${first(r, r.lag_flat_min)}</td><td>${first(r, r.lag_parker_min)}</td>` +
+      `<td>${first(r, r.lag_measured_min)}</td><td>${r.separation_km != null ? fmt(r.separation_km / 1000) + "k km" : "—"}</td></tr>`;
   };
-  $("pair-table").innerHTML = `<tr><th>Pair</th><th>Speed r</th><th>Speed bias</th><th>Bz r</th><th>Bz bias</th><th>Measured lag</th><th>Predicted lag</th><th>Apart</th></tr>` +
+  $("pair-table").innerHTML = `<tr><th>Pair</th><th>Speed r</th><th>Bz r</th><th>Measured: who sees it first</th><th>Predicted: flat fronts</th><th>Parker spiral</th><th>Fronts from data</th><th>Apart</th></tr>` +
     D.cross_spacecraft.map(cols).join("");
+  const TM = D.timing || {};
+  if (TM.available && TM.mean_abs_error_min) {
+    const e = TM.mean_abs_error_min;
+    $("timing-note").textContent = `Measured = the time offset that best lines up the two spacecraft's Bz. Predictions use only positions and wind speed, under different assumptions about how structures are tilted: ` +
+      `flat fronts (only the distance along the Sun–Earth line counts) miss by ${fmt(e.flat, 1)} min on average; fronts along the 45° Parker spiral miss by ${fmt(e.parker, 1)}; ` +
+      `fronts estimated from the data (constrained minimum variance analysis, ${TM.windows} one-hour windows, ${TM.frame}) miss by ${fmt(e.measured, 1)}. ` +
+      `Sideways separation matters because solar wind structures arrive tilted, not face-on.`;
+  }
 }
 
 /* ---------- section: separation ---------- */
 function renderSeparation(D) {
   const S = D.separation || { points: [] };
-  const pts = S.points.map(p => ({ x: p.sep_km / 1000, y: p.speed_diff_pct, pair: p.pair, day: p.day }));
-  const ds = [{ label: "pair-days", data: pts, backgroundColor: css("--series-1"), borderColor: css("--surface-1"), borderWidth: 2, pointRadius: 5, pointHoverRadius: 7 }];
-  if (S.fit && pts.length) {
-    const xs = pts.map(p => p.x), x0 = 0, x1 = Math.max(...xs) * 1.1;
-    ds.push({ label: "trend", type: "line", data: [{ x: x0, y: S.fit.intercept_pct + S.fit.pct_per_100k_km * x0 / 100 },
-      { x: x1, y: S.fit.intercept_pct + S.fit.pct_per_100k_km * x1 / 100 }], borderColor: css("--text-muted"), borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0 });
-  }
+  const pairs = [...new Set(S.points.map(p => p.pair))];
+  const pc = ["--seq-3", "--seq-5", "--seq-7"];   // shades of one hue: pairs, not spacecraft, so not the spacecraft colours
+  const ds = pairs.map((pr, i) => ({ label: pr.replace("SOLAR1", "SOLAR-1"), data: S.points.filter(p => p.pair === pr).map(p => ({ x: p.sep_km / 1000, y: p.speed_diff_pct, day: p.day })),
+    backgroundColor: css(pc[i % 3]), borderColor: css("--surface-1"), borderWidth: 2, pointRadius: 5, pointHoverRadius: 7 }));
   const o = baseOpts("typical speed difference (%)");
   o.interaction = { mode: "nearest", intersect: true };
   o.scales.x = axisLin("distance between the two spacecraft (thousand km)", { min: 0 });
   o.scales.y.min = 0;
-  o.plugins.tooltip.callbacks = { label: c => c.raw.pair ? ` ${c.raw.pair.replace("SOLAR1", "SOLAR-1")}, ${new Date(c.raw.day).toLocaleDateString()}: ${fmt(c.raw.x)}k km apart, ${fmt(c.raw.y, 1)}% different` : " trend" };
+  o.plugins.tooltip.callbacks = { label: c => ` ${c.dataset.label}, ${new Date(c.raw.day).toLocaleDateString()}: ${fmt(c.raw.x)}k km apart, ${fmt(c.raw.y, 1)}% different` };
   draw("sep-chart", { type: "scatter", data: { datasets: ds }, options: o });
+  $("sep-legend").innerHTML = pairs.map((pr, i) => `<span style="--c:${css(pc[i % 3])}">${pr.replace("SOLAR1", "SOLAR-1")}</span>`).join("");
   if (S.fit) {
-    const E = S.earth_estimate;
-    $("sep-insight").textContent = `Across ${S.fit.n} pair-days, measured speeds differ by about ${fmt(S.fit.pct_per_100k_km, 2)}% more for every extra 100,000 km between spacecraft ` +
-      (S.fit.intercept_pct > 0 ? `(${fmt(S.fit.intercept_pct, 1)}% even when close, mostly instrument differences).` : ".") +
-      (S.fit.n < 30 ? " Early estimate: it sharpens as more pair-days accumulate." : "") +
-      (E ? ` ${NAME[E.source]} sits ${fmt(E.off_axis_km / 1000)},000 km off the Sun–Earth line, so the wind that reaches Earth may differ from its reading by roughly ${fmt(E.expected_speed_diff_pct, 1)}%.` : "");
+    const E = S.earth_estimate, F = S.fit;
+    $("sep-insight").textContent = `Across ${F.n} pair-days, measured speeds differ by about ${fmt(F.pct_per_100k_km, 2)}% more per extra 100,000 km of separation ` +
+      `(95% range ${fmt(F.ci[0], 2)} to ${fmt(F.ci[1], 2)}), after giving each pair its own offset for instrument differences.` +
+      (E ? ` ${NAME[E.source]} sits ${fmt(E.off_axis_km / 1000)},000 km off the Sun–Earth line, so the wind reaching Earth may differ from its reading by roughly ${fmt(E.expected_speed_diff_pct, 1)}% (range ${fmt(E.ci[0], 1)}–${fmt(E.ci[1], 1)}%).` : "");
   } else {
-    $("sep-insight").textContent = `Collecting: the trend needs at least ${S.needed || 10} pair-days of overlap spread across different separations (currently ${pts.length}). As the halo orbits carry the spacecraft closer together and further apart over the coming months, this becomes a real measurement.`;
+    const R = S.within_pair_range_km || {}, best = Math.max(0, ...Object.values(R));
+    $("sep-insight").textContent = `Collecting. Each pair has a built-in offset from instrument differences, so the effect of distance can only be measured as a pair's separation changes. ` +
+      `That needs a pair to move 50,000 km apart or together; the most any pair has moved so far is ${fmt(best / 1000)},000 km. ` +
+      `The orbits shift that much over weeks to months, and this record is kept permanently, so the estimate will appear on its own.`;
   }
 }
 

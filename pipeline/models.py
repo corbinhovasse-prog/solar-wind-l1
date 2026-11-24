@@ -64,8 +64,12 @@ def active_series(df: pd.DataFrame) -> pd.DataFrame:
     plasma = _best_rows(cal, "proton_speed", "active_wind", PLASMA_COLS).rename(columns={"source": "plasma_source"})
     mag = _best_rows(df, "bz_gsm", "active_mag", MAG_COLS).rename(columns={"source": "mag_source"})
     s = plasma.join(mag, how="outer").sort_index()
-    # plasma can arrive less often than the field: carry it forward at most 10 minutes
-    s = s.asfreq("1min")
+    # plasma can arrive less often than the field: carry it forward at most 10 minutes.
+    # The grid is whole UTC minutes from first to last, so it never depends on the
+    # seconds of whichever record happens to be oldest.
+    s.index = s.index.floor("min")
+    s = s[~s.index.duplicated(keep="last")]
+    s = s.reindex(pd.date_range(s.index.min(), s.index.max(), freq="1min", tz="UTC", name="time_tag"))
     for c in PLASMA_COLS + ["plasma_source"]:
         if c in s:
             s[c] = s[c].ffill(limit=10)
@@ -113,7 +117,7 @@ def cross_spacecraft(df: pd.DataFrame, min_overlap: int = 12) -> list[dict]:
                 "median_abs_diff": round(float(diff.abs().median()), 3),
             }
         # timing offset using Bz, which has the most minute-scale structure
-        ab = pd.concat([a["bz_gsm"], b["bz_gsm"]], axis=1, keys=["a", "b"]).asfreq("1min") if "bz_gsm" in a else None
+        ab = pd.concat([a["bz_gsm"], b["bz_gsm"]], axis=1, sort=True, keys=["a", "b"]).asfreq("1min") if "bz_gsm" in a else None
         if ab is not None and ab.dropna().shape[0] >= 60:
             lag, r = best_lag_minutes(ab["a"], ab["b"])
             row["bz_best_lag_min"] = int(lag)
@@ -161,14 +165,91 @@ def _why(feat: str, value: float, z: float) -> str:
     return f"{FEATURE_WORDS[feat]} {fmt.format(value)} {unit} ({'far above' if z > 0 else 'far below'} this week's normal)"
 
 
-def detect_anomalies(s: pd.DataFrame, contamination: float = 0.01) -> tuple[pd.Series, list[dict]]:
-    """Isolation Forest on physical features plus their 10-minute changes.
+# Physical thresholds. Checked on EVERY minute, independently of the anomaly model,
+# so a real event is never missed just because the model's 1% quota went elsewhere.
+RULES = {
+    "south": {"bz_max": -10.0, "min_minutes": 15},             # Bz at or below -10 nT for 15+ min
+    "speed_jump": {"kms": 50.0},                               # 10-min median after vs before
+    "pressure": {"times_normal": 2.5, "floor_npa": 3.0, "min_minutes": 10},
+    "field": {"times_normal": 2.5, "floor_nt": 15.0, "min_minutes": 10},
+    # Storms are often driven not by one jump but by hours of moderately southward field.
+    # 3-hour mean Newell coupling >= 8: calibrated on NASA OMNI 2000-2026, where Kp reached
+    # storm level (5+) after 29% of such windows (11x the base rate) and 79% of storms were
+    # preceded by one. The dashboard recomputes these numbers from the data on every run.
+    "sustained": {"coupling_3h": 8.0},
+}
 
-    It learns what a normal minute looks like this week and scores how easy each
-    minute is to isolate from the rest; the easiest 1% are flagged. For each
-    flagged event we also report WHICH features were most unusual (robust
-    z-scores: distance from the median in units of the typical spread), so the
-    flag can be explained instead of just trusted."""
+
+def _runs(mask: pd.Series, min_len: int) -> pd.Series:
+    """Keep only stretches of True that last at least min_len consecutive minutes."""
+    grp = (mask != mask.shift()).cumsum()
+    size = mask.groupby(grp).transform("size")
+    return mask & (size >= min_len)
+
+
+def _group(times: pd.DatetimeIndex, gap_min: int = 30) -> list[tuple]:
+    events, start, prev = [], None, None
+    for t in times:
+        if start is None:
+            start = prev = t
+        elif t - prev <= pd.Timedelta(minutes=gap_min):
+            prev = t
+        else:
+            events.append((start, prev)); start = prev = t
+    if start is not None:
+        events.append((start, prev))
+    return events
+
+
+def physical_flags(s: pd.DataFrame) -> pd.DataFrame:
+    """One column per rule, True on the minutes where that rule is met."""
+    s = s.asfreq("1min")
+    bz5 = s["bz_gsm"].rolling(5, min_periods=3).median()
+    p5 = s["pdyn_npa"].rolling(5, min_periods=3).median()
+    b5 = s["bt"].rolling(5, min_periods=3).median()
+    v = s["proton_speed"]
+    before = v.rolling(10, min_periods=5).median().shift(1)        # minutes t-10 .. t-1
+    after = v.rolling(10, min_periods=5).median().shift(-9)        # minutes t .. t+9
+    R = RULES
+    p_lim = max(R["pressure"]["floor_npa"], R["pressure"]["times_normal"] * s["pdyn_npa"].median())
+    b_lim = max(R["field"]["floor_nt"], R["field"]["times_normal"] * s["bt"].median())
+    out = pd.DataFrame(index=s.index)
+    out["south"] = _runs((bz5 <= R["south"]["bz_max"]).fillna(False), R["south"]["min_minutes"])
+    out["speed_jump"] = ((after - before) >= R["speed_jump"]["kms"]).fillna(False)
+    out["pressure"] = _runs((p5 >= p_lim).fillna(False), R["pressure"]["min_minutes"])
+    out["field"] = _runs((b5 >= b_lim).fillna(False), R["field"]["min_minutes"])
+    c3 = s["newell"].rolling(180, min_periods=120).mean()
+    out["sustained"] = (c3 >= R["sustained"]["coupling_3h"]).fillna(False)
+    out.attrs.update({"pressure_limit": p_lim, "field_limit": b_lim, "jump": (after - before), "c3": c3})
+    return out
+
+
+FEATURE_WORDS = {
+    "proton_speed": "wind speed", "proton_density": "density", "bt": "field strength",
+    "bz_gsm": "Bz", "pdyn_npa": "ram pressure", "d10_proton_speed": "10-minute speed change",
+    "d10_proton_density": "10-minute density change", "d10_bt": "10-minute field change",
+}
+
+
+def _why(feat: str, value: float, z: float) -> str:
+    """Turn one unusual feature into a short phrase a person can read."""
+    up = value > 0
+    if feat == "d10_proton_speed":
+        return f"speed {'jumped' if up else 'dropped'} {abs(value):.0f} km/s in 10 min"
+    if feat == "d10_proton_density":
+        return f"density {'jumped' if up else 'dropped'} {abs(value):.1f} /cm³ in 10 min"
+    if feat == "d10_bt":
+        return f"field strength {'rose' if up else 'fell'} {abs(value):.1f} nT in 10 min"
+    if feat == "bz_gsm":
+        return f"Bz {value:.1f} nT ({'strongly south' if value < 0 else 'strongly north'})"
+    unit = {"proton_speed": "km/s", "proton_density": "/cm³", "bt": "nT", "pdyn_npa": "nPa"}[feat]
+    fmt = "{:.0f}" if feat == "proton_speed" else "{:.1f}"
+    return f"{FEATURE_WORDS[feat]} {fmt.format(value)} {unit} ({'far above' if z > 0 else 'far below'} this week's normal)"
+
+
+def model_flags(s: pd.DataFrame, contamination: float = 0.01) -> tuple[pd.Series, pd.DataFrame]:
+    """Isolation Forest: marks the most unusual 1% of minutes in the week. It always fills
+    that quota, calm week or not, so on its own it only ever means 'unusual for this week'."""
     feats = pd.DataFrame(index=s.index)
     for c in ["proton_speed", "proton_density", "bt", "bz_gsm", "pdyn_npa"]:
         feats[c] = s[c]
@@ -176,70 +257,85 @@ def detect_anomalies(s: pd.DataFrame, contamination: float = 0.01) -> tuple[pd.S
         feats[f"d10_{c}"] = s[c].diff(10)
     feats = feats.dropna()
     if len(feats) < 200:
-        return pd.Series(dtype=float), []
-    scaler = RobustScaler().fit(feats)
-    X = scaler.transform(feats)
-    Z = pd.DataFrame(X, index=feats.index, columns=feats.columns)
+        return pd.Series(False, index=s.index), feats
+    X = RobustScaler().fit_transform(feats)
     model = IsolationForest(n_estimators=300, contamination=contamination, random_state=0)
-    flags = model.fit_predict(X) == -1
-    score = pd.Series(-model.score_samples(X), index=feats.index)
+    flag = pd.Series(model.fit_predict(X) == -1, index=feats.index)
+    z = pd.DataFrame(X, index=feats.index, columns=feats.columns)
+    z["_score"] = -model.score_samples(X)
+    return flag.reindex(s.index, fill_value=False), z
 
-    flagged = feats.index[flags]
-    events, start, prev = [], None, None
-    for t in flagged:
-        if start is None:
-            start = prev = t
-        elif t - prev <= pd.Timedelta(minutes=30):
-            prev = t
-        else:
-            events.append((start, prev))
-            start = prev = t
-    if start is not None:
-        events.append((start, prev))
 
-    med_p = s["pdyn_npa"].median()
+def detect_anomalies(s: pd.DataFrame, contamination: float = 0.01) -> tuple[pd.Series, list[dict]]:
+    """Significant events come from the physical rules (every minute checked).
+    Model-only flags are reported separately as minor, statistically unusual intervals."""
+    s = s.asfreq("1min")
+    if s["bz_gsm"].notna().sum() < 60:
+        return pd.Series(dtype=float), []
+    phys = physical_flags(s)
+    mflag, z = model_flags(s, contamination)
+    jump = phys.attrs["jump"]
     out = []
-    for a, b in events:
+
+    any_phys = phys.any(axis=1)
+    for a, b in _group(any_phys[any_phys].index):
+        w, f = s.loc[a:b], phys.loc[a:b]
+        rules, why = [], []
+        if f["south"].any():
+            mins = int(f["south"].sum())
+            rules.append("Bz at or below −10 nT for 15+ min")
+            why.append(f"Bz stayed at or below −10 nT for {mins} min (lowest {w['bz_gsm'].min():.1f} nT)")
+        if f["speed_jump"].any():
+            j = float(jump.loc[a:b].max())
+            rules.append("speed jump of 50+ km/s within 10 min")
+            why.append(f"speed rose {j:.0f} km/s within 10 minutes")
+        if f["pressure"].any():
+            rules.append(f"pressure above {phys.attrs['pressure_limit']:.1f} nPa (2.5× normal, at least 3)")
+            why.append(f"ram pressure reached {w['pdyn_npa'].max():.1f} nPa")
+        if f["field"].any():
+            rules.append(f"field strength above {phys.attrs['field_limit']:.1f} nT (2.5× normal, at least 15)")
+            why.append(f"field strength reached {w['bt'].max():.1f} nT")
+        if f["sustained"].any():
+            hrs = f["sustained"].sum() / 60
+            rules.append("3-hour average coupling of 8 or more")
+            why.append(f"coupling averaged {phys.attrs['c3'].loc[a:b].max():.1f} over 3 hours (Bz mostly south, "
+                       f"median {w['bz_gsm'].median():.1f} nT); sustained for {hrs:.1f} h")
+        # a shock compresses everything at once: speed, density AND field jump together
+        pre, post = s.loc[a - pd.Timedelta(minutes=20):a - pd.Timedelta(minutes=1)], s.loc[a:a + pd.Timedelta(minutes=20)]
+        ratio = lambda c: post[c].median() / pre[c].median() if pre[c].median() and np.isfinite(pre[c].median()) else np.nan
+        shock = f["speed_jump"].any() and ratio("proton_density") >= 1.3 and ratio("bt") >= 1.3
+        kind = ("Shock" if shock else "Strong southward field" if f["south"].any() else
+                "Sustained southward driving" if f["sustained"].any() else
+                "Speed jump" if f["speed_jump"].any() else "Pressure pulse" if f["pressure"].any() else "Strong field")
+        out.append(_event(a, b, w, kind, why, rules, True, bool(mflag.loc[a:b].any())))
+
+    # model-only intervals: unusual, but below every physical threshold
+    lone = mflag & ~any_phys.reindex(mflag.index, fill_value=False)
+    for a, b in _group(lone[lone].index):
         w = s.loc[a:b]
-        peak = score.loc[a:b].idxmax()
-        z = Z.loc[peak]
-        top = z.abs().sort_values(ascending=False).index[:3]
-        why = [_why(f, float(feats.loc[peak, f]), float(z[f])) for f in top]
-        d_v = float(feats.loc[a:b, "d10_proton_speed"].max())
-        d_n = float(feats.loc[a:b, "d10_proton_density"].max())
-        if d_v > 40 and d_n > 0:
-            kind = "Shock arrival"
-        elif w["bz_gsm"].min() < -10:
-            kind = "Strong southward field"
-        elif w["pdyn_npa"].max() > 2 * med_p:
-            kind = "Pressure pulse"
-        elif abs(float(z.get("d10_proton_density", 0))) > 4:
-            kind = "Density jump"
-        else:
-            kind = "Unusual combination"
-        # Isolation Forest always flags its quota (1%), even in a calm week. Only events that
-        # also cross a physical threshold are called significant; the rest are minor fluctuations.
-        med_bt = s["bt"].median()
-        reasons = []
-        if d_v >= 50:
-            reasons.append("speed jump of 50+ km/s")
-        if w["bz_gsm"].min() <= -10:
-            reasons.append("Bz at or below −10 nT")
-        if w["pdyn_npa"].max() >= max(3.0, 2.5 * med_p):
-            reasons.append("pressure 2.5× normal")
-        if w["bt"].max() >= max(15.0, 2.5 * med_bt):
-            reasons.append("field strength 2.5× normal")
-        out.append({
-            "significant": bool(reasons), "significance": reasons,
-            "start": a.isoformat(), "end": b.isoformat(), "peak": peak.isoformat(),
-            "minutes": int((b - a).total_seconds() // 60) + 1, "type": kind, "why": why,
-            "max_speed": round(float(w["proton_speed"].max()), 1),
-            "min_bz": round(float(w["bz_gsm"].min()), 2),
-            "max_pdyn": round(float(w["pdyn_npa"].max()), 2),
-            "geoeffective": bool(w["bz_gsm"].min() < -5),
-            "score": round(float(score.loc[a:b].max()), 3),
-        })
+        zz = z.loc[a:b]
+        peak = zz["_score"].idxmax()
+        top = zz.loc[peak].drop("_score").abs().sort_values(ascending=False).index[:3]
+        src = pd.DataFrame({c: s[c] for c in ["proton_speed", "proton_density", "bt", "bz_gsm", "pdyn_npa"]})
+        for c in ["proton_speed", "proton_density", "bt"]:
+            src[f"d10_{c}"] = s[c].diff(10)
+        why = [_why(c, float(src.loc[peak, c]), float(zz.loc[peak, c])) for c in top]
+        out.append(_event(a, b, w, "Unusual for this week", why, [], False, True))
+    out.sort(key=lambda e: e["start"])
+    score = z["_score"] if "_score" in z else pd.Series(dtype=float)
     return score, out
+
+
+def _event(a, b, w, kind, why, rules, significant, model_flagged) -> dict:
+    return {
+        "start": a.isoformat(), "end": b.isoformat(),
+        "minutes": int((b - a).total_seconds() // 60) + 1, "type": kind, "why": why,
+        "significant": significant, "significance": rules, "model_flagged": model_flagged,
+        "max_speed": round(float(w["proton_speed"].max()), 1) if w["proton_speed"].notna().any() else None,
+        "min_bz": round(float(w["bz_gsm"].min()), 2) if w["bz_gsm"].notna().any() else None,
+        "max_pdyn": round(float(w["pdyn_npa"].max()), 2) if w["pdyn_npa"].notna().any() else None,
+        "geoeffective": bool(w["bz_gsm"].min() < -5) if w["bz_gsm"].notna().any() else False,
+    }
 
 
 def kp_link(s: pd.DataFrame, kp: pd.DataFrame) -> dict:
@@ -248,13 +344,13 @@ def kp_link(s: pd.DataFrame, kp: pd.DataFrame) -> dict:
     because the relation is monotonic but not linear."""
     c = s["newell"].resample("3h", origin="epoch").mean().rename("newell")
     k = kp.set_index("time_tag")["kp"]
-    j = pd.concat([c, k], axis=1).dropna()
+    j = pd.concat([c, k], axis=1, sort=True).dropna()
     res = {"n": int(len(j)), "pairs": [
         {"t": t.isoformat(), "newell": round(float(r.newell), 2), "kp": float(r.kp)} for t, r in j.iterrows()
     ]}
     if len(j) >= 8:
         res["spearman"] = round(float(j["newell"].corr(j["kp"], method="spearman")), 3)
-        lagged = pd.concat([c.shift(1), k], axis=1).dropna()
+        lagged = pd.concat([c.shift(1), k], axis=1, sort=True).dropna()
         if len(lagged) >= 8:
             res["spearman_prev_window"] = round(float(lagged.iloc[:, 0].corr(lagged["kp"], method="spearman")), 3)
     return res

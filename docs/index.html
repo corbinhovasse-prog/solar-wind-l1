@@ -28,8 +28,8 @@
     <div class="eyebrow">Live data pipeline · refreshed every 30 minutes</div>
     <h1>Three spacecraft, one solar wind</h1>
     <p class="lede">Three spacecraft now stream real-time solar wind from the Sun–Earth L1 point, about 1.5 million km sunward:
-      NOAA's <strong>SOLAR-1</strong> (operational since June 2026), NASA's <strong>IMAP</strong>, and the 28-year-old
-      <strong>ACE</strong>. This page turns their measurements into the questions that matter: what is coming, how much warning
+      NOAA's <strong>SOLAR-1</strong> (operational since June 2026), NASA's <strong>IMAP</strong>, and
+      <strong>ACE</strong>, in service since 1997. This page turns their measurements into the questions that matter: what is coming, how much warning
       we get, whether the instruments agree, and how much of Earth's response the wind actually explains.</p>
     <div class="meta" id="meta">Loading…</div>
   </header>
@@ -81,8 +81,8 @@
   <!-- ============ WHERE ============ -->
   <section class="card" id="where">
     <h2>Where the spacecraft are</h2>
-    <p class="sub">All three loop around L1 on halo orbits that take about six months per lap. They avoid the exact Sun–Earth line
-      because the Sun's radio noise would drown out their signal. Lines trace the last six months; dots mark today.</p>
+    <p class="sub">All three travel large loops around L1 (halo and Lissajous orbits) that take about six months per lap. They avoid the
+      exact Sun–Earth line because the Sun's radio noise would drown out their signal. Lines trace the last six months; dots mark today.</p>
     <div class="legend" id="pos-legend"></div>
     <div class="panel-title">Seen from above the solar system, to scale</div>
     <div id="map-top" class="map"></div>
@@ -90,7 +90,7 @@
       <div>
         <div class="panel-title">Looking from Earth toward the Sun</div>
         <div id="map-yz" class="map"></div>
-        <p class="note">The dashed circle is the Moon's orbit drawn at the same scale: each halo loop is roughly as wide as the Moon's whole orbit.</p>
+        <p class="note">The dashed circle is the Moon's orbit drawn at the same scale: each loop is roughly as wide as the Moon's whole orbit.</p>
       </div>
       <div>
         <div class="panel-title">How far, and how long it takes</div>
@@ -107,7 +107,7 @@
     <h2>Magnetic field and flagged events</h2>
     <p class="sub">Bz is the north–south part of the solar wind's magnetic field. When it points south (below zero) it links up with
       Earth's field and opens a door for energy; the longer and stronger it stays south, the bigger the response. Shaded bands are
-      intervals the anomaly model flagged. Tap or click an event to zoom in.</p>
+      flagged intervals. Tap or click an event to zoom in.</p>
     <div class="controls">
       <div class="seg" id="bz-range-seg"></div>
       <button class="btn-quiet" id="bz-reset" hidden>Show full window</button>
@@ -116,14 +116,17 @@
     <div class="chart tall"><canvas id="bz-chart"></canvas></div>
     <div class="events" id="events"></div>
     <details class="method">
-      <summary>How the anomaly model decides</summary>
-      <p>An Isolation Forest looks at eight measurements for every minute of the past week: speed, density, field strength, Bz,
-        ram pressure, and how fast speed, density and field strength changed over 10 minutes. It repeatedly splits the data at
-        random; minutes that get isolated in very few splits are unlike the rest, and the most isolated 1% are flagged.
-        For each event the cards list the measurements that sat furthest from the week's median, in units of their usual
-        spread. The model always flags its quota, even in a calm week, so a flag alone only means <em>unusual for this week</em>.
-        An event is called significant only if it also crosses a physical threshold: a speed jump of 50 km/s or more, Bz at or
-        below −10 nT, or pressure or field strength 2.5 times the week's normal. It matters for Earth when Bz is also strongly south.</p>
+      <summary>How events are detected</summary>
+      <p><strong>Significant events</strong> come from fixed physical rules, checked on every minute of the week: Bz at or below
+        −10 nT for 15 minutes or more; speed up 50 km/s or more (median of the next 10 minutes vs the previous 10); ram pressure at
+        least 2.5 times the week's median <em>and</em> at least 3 nPa for 10 minutes; field strength at least 2.5 times the median
+        <em>and</em> at least 15 nT for 10 minutes; or a 3-hour average coupling of 8 or more, i.e. hours of moderately southward
+        field. <span id="storm-rule-note"></span> A "shock" label needs speed, density and field strength to jump together.</p>
+      <p><strong>Minor fluctuations</strong> come from an Isolation Forest, a machine-learning model that marks the most unusual 1% of
+        minutes in the week. It always fills that 1%, even in a calm week, so on its own a flag means only "unusual for this week";
+        it never decides whether something is significant.</p>
+      <p><strong>Kp afterwards</strong> compares the Kp window that ended before the wind reached Earth with the highest Kp in the
+        6 hours after it arrived, so a storm already underway isn't credited to the event.</p>
     </details>
   </section>
 
@@ -174,6 +177,9 @@
         <div class="panel-title">How much of Kp each factor explains</div>
         <div class="explain-bar" id="explain-bar"></div>
         <p class="note" id="explain-note"></p>
+        <div class="panel-title" style="margin-top:16px">Tested on years the models never saw</div>
+        <div class="table-wrap"><table id="oos-table"></table></div>
+        <p class="note" id="oos-note"></p>
       </div>
       <div>
         <div class="panel-title">What the solar wind alone misses, by month</div>
@@ -182,12 +188,18 @@
       </div>
     </div>
     <details class="method">
-      <summary>Reading ρ and R²</summary>
-      <p><strong>Spearman's ρ (rho)</strong> asks one question: when coupling is higher than usual, is Kp also higher than usual?
-        It ranks both lists and compares the rankings, so it doesn't assume a straight-line relationship. +1 means they always rise
-        together, 0 means no relationship, −1 means one rises as the other falls. Above about 0.7 is strong for messy natural data.</p>
-      <p><strong>R²</strong> is the share of Kp's ups and downs a model reproduces. 0.65 means 65% is explained and 35% comes from
-        something the model doesn't see. Adding factors one at a time and watching R² grow shows what each one contributes.</p>
+      <summary>Reading ρ, p, R² and the shares</summary>
+      <p><strong>Spearman's ρ (rho)</strong>: when coupling is higher than usual, is Kp also higher than usual? It compares rankings, so it
+        doesn't assume a straight line. +1 means they always rise together, 0 no relationship, −1 opposite.</p>
+      <p><strong>p-value and 95% range</strong>: Kp and coupling change slowly, so neighbouring 3-hour windows aren't independent
+        samples, and a standard test would overstate certainty. The p-value uses an effective sample size (Bretherton et al. 1999) and
+        the 95% range comes from resampling whole days (a block bootstrap). Tested on pairs of unrelated slow series, this keeps
+        false alarms near the promised 5%.</p>
+      <p><strong>R²</strong>: the share of Kp's ups and downs a model reproduces. The headline figures are measured on years the
+        model never saw (fitted on 2000–2018, scored on 2019 onward), which is the honest test of predictive skill.</p>
+      <p><strong>Shares</strong>: Shapley values (also called LMG). Each factor's average contribution over every order in which the
+        factors could be added, so the split doesn't depend on which one goes first. Coupling and the viscous term are scaled by
+        their medians before the log, so the results don't depend on units.</p>
     </details>
   </section>
 
@@ -195,19 +207,19 @@
   <section class="card" id="agree">
     <h2>Do the three spacecraft agree?</h2>
     <p class="sub">Two separate questions. <strong>Calibration:</strong> does a spacecraft read steadily high or low compared with
-      the others? That's normal for real-time data from different instruments and can be corrected. <strong>Tracking:</strong> once
-      that steady offset is removed, does it rise and fall with the others? Readings are first lined up in time using each
-      spacecraft's position, then compared in 5-minute steps: in step means speed within 4%, density within 20% and Bz within
-      2 nT of the other spacecraft.</p>
+      the others? That's normal for real-time data from different instruments, and it's corrected before readings are combined.
+      <strong>Tracking:</strong> does it rise and fall <em>with</em> the others? That's measured as the correlation of hour-to-hour
+      changes, after lining up each spacecraft's timing, and it has to beat a chance level. Being close in value isn't enough:
+      a stuck sensor sitting near the average would look close.</p>
     <div class="agree-top">
-      <div class="big-number"><div id="sync-num">–</div><div class="label" id="sync-label">of the time all three move in step</div></div>
+      <div class="big-number"><div id="sync-num">–</div><div class="label" id="sync-label"></div></div>
       <div class="sc-cards" id="sc-cards"></div>
     </div>
     <div class="panel-title">Hour by hour, last 7 days</div>
     <div class="strip" id="strip"></div>
     <div class="strip-legend">
-      <span><i class="sw agree"></i>agrees with the others</span><span><i class="sw differ"></i>differs</span>
-      <span><i class="sw solo"></i>reporting alone</span><span><i class="sw nodata"></i>no data</span>
+      <span><i class="sw agree"></i>Bz changes match the others (6-hour window)</span><span><i class="sw differ"></i>differ</span>
+      <span><i class="sw quiet"></i>too quiet to judge</span><span><i class="sw solo"></i>reporting alone</span><span><i class="sw nodata"></i>no data</span>
     </div>
     <ul class="rules">
       <li><strong>Two agree, one differs:</strong> trust the pair. The odd one is likely an instrument issue or sits in a different patch of wind.</li>
@@ -217,9 +229,7 @@
     <div class="panel-title" style="margin-top:18px">Pair statistics, last 7 days</div>
     <div class="table-wrap"><table id="pair-table"></table></div>
     <p class="table-hint">Swipe the table sideways to see every column.</p>
-    <p class="note">r: correlation of 5-minute averages (1 = move together perfectly, 0 = unrelated). Bias: second spacecraft minus first.
-      Measured lag: the time offset that best lines up their Bz. Predicted lag: the same offset worked out only from their positions
-      and the wind speed; when the two match, timing differences are explained by geometry.</p>
+    <p class="note" id="timing-note">r: correlation of 5-minute averages (1 = move together perfectly, 0 = unrelated).</p>
   </section>
 
   <!-- ============ L1 IS NOT EARTH ============ -->
@@ -229,8 +239,9 @@
       spacecraft pairs at different separations shows how quickly the wind changes across space, and so how far the wind
       reaching Earth may differ from what's measured.</p>
     <div class="insight" id="sep-insight"></div>
+    <div class="legend" id="sep-legend"></div>
     <div class="chart"><canvas id="sep-chart"></canvas></div>
-    <p class="note">Each dot is one spacecraft pair on one day: their distance apart vs. the typical difference in measured speed.</p>
+    <p class="note">Each dot is one spacecraft pair on one day: their distance apart vs. the median hourly difference in measured speed.</p>
   </section>
 
   <footer>

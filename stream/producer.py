@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from pathlib import Path
 
 from confluent_kafka import Producer
 
@@ -38,8 +39,8 @@ def main():
     send = lambda r: prod.produce(TOPIC, key=r["source"], value=json.dumps(r))
 
     if a.replay:
-        wind = json.load(open(f"{a.replay}/wind.json"))
-        mag = json.load(open(f"{a.replay}/mag.json"))
+        wind = json.loads(Path(a.replay, "wind.json").read_text(encoding="utf-8"))
+        mag = json.loads(Path(a.replay, "mag.json").read_text(encoding="utf-8"))
         for i, r in enumerate(records(wind, mag)):
             send(r)
             prod.poll(0)

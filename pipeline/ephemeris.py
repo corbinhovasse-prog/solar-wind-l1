@@ -81,7 +81,7 @@ def fetch_positions(offline_dir: str | None = None, days: int = 180) -> tuple[pd
         p = Path(offline_dir, "positions.json")
         if not p.exists():
             return pd.DataFrame(), {}
-        raw = json.loads(p.read_text())
+        raw = json.loads(p.read_text(encoding="utf-8"))
         df = pd.DataFrame(raw["tracks"])
         df["time_tag"] = pd.to_datetime(df["time_tag"], utc=True)
         return df, raw["bodies"]

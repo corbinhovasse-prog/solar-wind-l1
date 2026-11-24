@@ -12,13 +12,19 @@ PROTON_MASS_KG = 1.6726e-27
 L1_DISTANCE_KM = 1.5e6  # approximate Earth-L1 distance; spacecraft fly halo orbits around it
 
 
-def dynamic_pressure_npa(density_cc, speed_kms):
+HELIUM_RATIO = 0.04  # typical alpha-to-proton number ratio in the solar wind
+
+
+def dynamic_pressure_npa(density_cc, speed_kms, alpha_ratio=HELIUM_RATIO):
     """Ram pressure rho*v^2 of the solar wind in nanopascals.
 
     n [cm^-3] -> m^-3 (x1e6), v [km/s] -> m/s (x1e3), Pa -> nPa (x1e9):
-    1.6726e-27 * 1e6 * 1e6 * 1e9 = 1.6726e-6
+    1.6726e-27 * 1e6 * 1e6 * 1e9 = 1.6726e-6 for protons alone.
+    Helium nuclei are 4x heavier, so they add (1 + 4 * alpha/proton) to the mass;
+    at a typical 4% that's 16% more pressure. Leaving it out reads pressure too low.
+    (NASA OMNI's convention, 2.0e-6 * n * v^2, assumes about 5%.)
     """
-    return 1.6726e-6 * density_cc * speed_kms ** 2
+    return 1.6726e-6 * density_cc * speed_kms ** 2 * (1 + 4 * alpha_ratio)
 
 
 def clock_angle_rad(by, bz):
@@ -46,7 +52,11 @@ def lead_time_minutes(speed_kms):
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["pdyn_npa"] = dynamic_pressure_npa(df["proton_density"], df["proton_speed"])
+    ratio = HELIUM_RATIO
+    if "alpha_density" in df and df["alpha_density"].notna().sum() > 100:
+        # measured helium where the spacecraft reports it, typical ratio elsewhere
+        ratio = (df["alpha_density"] / df["proton_density"]).clip(0, 0.3).fillna(HELIUM_RATIO)
+    df["pdyn_npa"] = dynamic_pressure_npa(df["proton_density"], df["proton_speed"], ratio)
     df["newell"] = newell_coupling(df["proton_speed"], df["by_gsm"], df["bz_gsm"])
     df["lead_time_min"] = lead_time_minutes(df["proton_speed"])
     return df
